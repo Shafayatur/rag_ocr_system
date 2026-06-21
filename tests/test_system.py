@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.database import DatabaseService
 from app.services.chunker import chunk_text, split_into_sentences
-from app.services.vector_store import VectorStoreService, TFIDFVectorizer
+from app.services.vector_store import VectorStoreService
 from app.services.ocr_service import detect_language as ocr_detect_lang, preprocess_image
 
 
@@ -70,31 +70,7 @@ def test_chunker():
         print(f"  ✅ Overlap check: chunk[0] ends at char {chunks[0]['char_end']}, chunk[1] starts at {chunks[1]['char_start']}")
 
 
-# ── Test 3: TF-IDF Vectorizer ────────────────────────────────────────────────
-def test_tfidf():
-    print("\n[3] TF-IDF Vector Store")
-    corpus = [
-        "machine learning artificial intelligence deep neural network",
-        "Dhaka Bangladesh capital city population",
-        "sensor data time series prediction forecast model",
-        BANGLA_SAMPLE,
-    ]
-    vec = TFIDFVectorizer(ngram_range=(2, 3))
-    vec.fit(corpus)
-    assert vec._fitted
-    assert len(vec.vocabulary) > 0
-
-    q_vec = vec.transform("machine learning model")
-    doc_vec = vec.transform(corpus[0])
-    sim = vec.cosine_similarity(q_vec, doc_vec)
-    assert sim > 0, "Query should match its own document"
-
-    # Different doc should score lower
-    other_vec = vec.transform(corpus[1])
-    other_sim = vec.cosine_similarity(q_vec, other_vec)
-    assert sim > other_sim, "Relevant doc should score higher"
-    print(f"  ✅ Vocabulary: {len(vec.vocabulary)} ngrams")
-    print(f"  ✅ Similarity (relevant): {sim:.4f} | (irrelevant): {other_sim:.4f}")
+# ── Test 3: TF-IDF Vectorizer removed (using multilingual dense embeddings only) ──
 
 
 # ── Test 4: Database ─────────────────────────────────────────────────────────
@@ -176,12 +152,13 @@ def test_vector_search():
                 db.insert_chunks(did, chunks)
 
         vs = VectorStoreService()
-        vs.load_from_db(db)
-        assert vs._fitted
-        print(f"  ✅ Index built with {len(vs._chunk_records)} chunks")
+        all_chunks = db.get_all_chunks()
+        vs.add_chunks(all_chunks)
+        assert vs.collection.count() > 0
+        print(f"  ✅ Index built with {vs.collection.count()} chunks")
 
-        # Semantic search — should return agriculture doc
-        results = vs.search("crop harvest rainfall prediction", top_k=3)
+        # Semantic search — should return agriculture doc (restricting to test chunks only to isolate from existing store)
+        results = vs.search("crop harvest rainfall prediction", top_k=3, filtered_chunks=db.get_all_chunks())
         assert results, "Should find results"
         top = results[0]
         assert "agriculture" in top["filename"].lower(), f"Expected agriculture doc, got {top['filename']}"
@@ -225,7 +202,6 @@ if __name__ == "__main__":
     for fn in [
         test_language_detection,
         test_chunker,
-        test_tfidf,
         test_database,
         test_vector_search,
         test_sentence_split,

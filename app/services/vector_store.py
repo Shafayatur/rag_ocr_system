@@ -162,6 +162,12 @@ class VectorStoreService:
         if self.collection.count() == 0:
             return []
 
+        # If a list of filtered chunks is provided but is empty, it means no chunks
+        # matched the database filters. Return early to avoid querying ChromaDB with
+        # empty filter criteria (which causes a ChromaDB syntax error).
+        if filtered_chunks is not None and not filtered_chunks:
+            return []
+
         where_clause = self._build_where_clause(filtered_chunks)
         query_embedding = self._embed([query])[0]
 
