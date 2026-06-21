@@ -62,9 +62,9 @@ def rag_search(body: RAGQueryRequest, request: Request):
        - Searches only within the metadata-filtered chunk pool.
        - Returns top_k most relevant chunks.
 
-    3. **LLM Answer Generation** (gemini-2.5-flash):
+    3. **LLM Answer Generation** (local Ollama model by default):
        - Retrieved chunks are passed as context.
-       - Model generates a grounded, cited answer.
+       - Model generates a grounded, cited answer entirely on-device.
     """
     db = request.app.state.db
     vector_store = request.app.state.vector_store

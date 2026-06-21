@@ -7,6 +7,7 @@ vector-based semantic search, and metadata-filtered RAG.
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import os
 
@@ -26,7 +27,8 @@ async def lifespan(app: FastAPI):
     db = DatabaseService()
     db.initialize()
 
-    # Initialize vector store (in-memory TF-IDF + cosine similarity; no external deps)
+    # Initialize vector store (ChromaDB + multilingual sentence-transformer embeddings;
+    # see app/services/vector_store.py for details)
     vs = VectorStoreService()
     vs.load_from_db(db)
 
@@ -67,8 +69,14 @@ app.include_router(search.router, prefix="/api/search", tags=["Search & RAG"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 
 
-@app.get("/", tags=["Health"])
+@app.get("/", tags=["Health"], include_in_schema=False)
 def root():
+    """Serve the frontend UI."""
+    return FileResponse("static/index.html")
+
+
+@app.get("/status", tags=["Health"])
+def status():
     return {
         "status": "running",
         "message": "Local OCR & RAG System — Assessment 3",

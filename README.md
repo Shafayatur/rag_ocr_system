@@ -3,6 +3,12 @@
 A fully localized, privacy-first document processing pipeline with multilingual OCR
 (Bangla + English) and a hybrid semantic search + metadata-filtered RAG system.
 
+> **Fully local by default.** OCR (Tesseract), embeddings (sentence-transformers),
+> vector search (ChromaDB), and answer generation (Ollama) all run on-device. No
+> document content is sent to any external commercial API in the default
+> configuration. An optional, explicitly opt-in cloud LLM fallback exists for
+> low-resource machines (see "Answer Generation" below) but is off by default.
+
 ---
 
 ## Architecture Overview
@@ -23,9 +29,9 @@ A fully localized, privacy-first document processing pipeline with multilingual 
 |                                                |                     |
 |  +----------+   +--------------+   +----------v-----------+        |
 |  |  Search  |-->|  RAG Service |<--|  Vector Store        |        |
-|  |  Router  |   |  (Gemini)    |   |  (ChromaDB +         |        |
-|  +----------+   +--------------+   |  multilingual        |        |
-|                                     |  sentence embeddings) |        |
+|  |  Router  |   |  (Ollama,    |   |  (ChromaDB +         |        |
+|  +----------+   |   local LLM) |   |  multilingual        |        |
+|                  +--------------+   |  sentence embeddings) |        |
 |                                     +-----------------------+        |
 +---------------------------------------------------------------------+
               |
@@ -33,6 +39,12 @@ A fully localized, privacy-first document processing pipeline with multilingual 
    |   HTML/JS UI        |   (served at http://localhost:8000)
    +----------------------+
 ```
+
+Every stage — OCR, embedding, vector search, and answer generation — runs on
+localhost. The only one-time network calls are downloading the embedding model
+weights from HuggingFace and the LLM weights via `ollama pull`; after that, the
+system serves queries with zero outbound network calls, satisfying the "no
+external commercial APIs" requirement end-to-end (not just for OCR).
 
 ---
 
@@ -125,6 +137,57 @@ embedding = model.encode(text, normalize_embeddings=True)
 
 ---
 
+### Answer Generation: Local LLM via Ollama
+
+**Why a local LLM instead of a cloud API?**
+
+The assessment requires that documents be processed "without sending data to
+external commercial APIs." OCR and embeddings already satisfy this, but the final
+answer-generation step also needs to stay local — otherwise the retrieved chunk
+text (i.e. private document content) would leave the machine on every query. This
+system therefore defaults to **Ollama**, a local model server, for that step.
+
+```bash
+# One-time setup
+ollama pull qwen2.5:3b       # ~2 GB download, runs comfortably on CPU
+ollama serve                  # starts the local server on :11434
+```
+
+No `GEMINI_API_KEY` or any other cloud credential is required for the default
+configuration. The backend is configurable via environment variables:
+
+| Variable          | Default                  | Purpose                              |
+| ------------------ | ------------------------ | ------------------------------------- |
+| `LLM_BACKEND`       | `ollama`                 | `ollama` (local) or `gemini` (cloud)  |
+| `OLLAMA_BASE_URL`   | `http://localhost:11434` | Local Ollama server address           |
+| `OLLAMA_MODEL`      | `qwen2.5:3b`              | Any pulled Ollama model               |
+
+**Why `qwen2.5:3b` specifically?** It was chosen over larger models (e.g. an 8B
+Llama variant) deliberately for hardware reach: at ~2GB it runs comfortably on
+CPU-only laptops without the system becoming unresponsive, while an 8B model
+can spike memory/CPU hard enough on modest hardware to feel like a freeze.
+Qwen's multilingual training also tends to handle Bangla reasonably well for
+its size. `OLLAMA_MODEL` is fully swappable — on a machine with more RAM/a
+GPU, a larger model (e.g. `llama3.1:8b`, `qwen2.5:7b`) will generally produce
+stronger, more nuanced answers, especially on Bangla synthesis.
+
+**Trade-offs vs. cloud APIs:**
+
+| Factor              | Local (Ollama, this system) | Cloud (Gemini, optional opt-in) |
+| -------------------- | ---------------------------- | --------------------------------- |
+| Data privacy         | Document text never leaves the machine | Retrieved chunks sent to Google |
+| Setup                | `ollama pull` + local RAM/CPU/GPU | API key only |
+| Latency (CPU-only)   | Slower (~3-10s for a 3B model) | Faster (~1-2s) |
+| Answer quality       | Good for a small 3B instruction model; noticeably weaker than frontier cloud models, especially on nuanced Bangla. Swapping in a larger Ollama model narrows this gap at the cost of speed/RAM. | Generally stronger |
+| Cost                 | Free after download | Per-token billing |
+
+A cloud fallback (`LLM_BACKEND=gemini`) is left in the code, explicitly opt-in,
+for cases where the deployment machine can't comfortably run a local model — but
+the default behavior, and what's demonstrated in the demo video, is fully local
+end-to-end.
+
+---
+
 ### Hybrid Search Architecture: Metadata + Vector
 
 The key architectural decision is applying metadata filters **before** vector scoring,
@@ -149,8 +212,8 @@ User query + filters
          |
          v top-k results
 +--------------------+
-|  RAG Service       |  <- Gemini API (gemini-2.5-flash)
-|  .rag_query()      |     Context-stuffed prompt generation
+|  RAG Service       |  <- Local LLM via Ollama (default: qwen2.5:3b)
+|  .rag_query()      |     Context-stuffed prompt generation, fully on-device
 +--------------------+
 ```
 
@@ -235,6 +298,11 @@ sudo apt-get install tesseract-ocr tesseract-ocr-ben poppler-utils
 
 # macOS
 brew install tesseract tesseract-lang poppler
+
+# Install Ollama (local LLM server) — https://ollama.com/download
+# Linux:
+curl -fsSL https://ollama.com/install.sh | sh
+# macOS: download the app from ollama.com, or `brew install ollama`
 ```
 
 ### Installation
@@ -244,11 +312,18 @@ cd rag_ocr_system
 pip install -r requirements.txt
 ```
 
-### Set your Gemini API key
+### Pull and start the local LLM
 ```bash
-export GEMINI_API_KEY=your_actual_key_here
+ollama pull qwen2.5:3b    # one-time download, ~2 GB
+ollama serve              # starts the local server on :11434 (default backend)
 ```
-Get a free key at https://aistudio.google.com/apikey
+
+No cloud API key is required for the default setup. If your machine can't run a
+local model comfortably, you can opt into the cloud fallback instead:
+```bash
+export LLM_BACKEND=gemini
+export GEMINI_API_KEY=your_actual_key_here   # https://aistudio.google.com/apikey
+```
 
 ### Run
 ```bash
@@ -261,8 +336,9 @@ Open `http://localhost:8000` — the UI is served from `/static/index.html`.
 API docs at `http://localhost:8000/docs`.
 
 **Note**: First run downloads the multilingual embedding model (~970 MB) from
-HuggingFace. This requires internet access once; after that, everything (OCR,
-embedding, vector search) runs fully offline.
+HuggingFace, and `ollama pull` downloads the LLM weights (~4.7 GB) once. Both
+require internet access only for that initial download; after that, everything
+(OCR, embedding, vector search, and answer generation) runs fully offline.
 
 ### Run Tests
 ```bash
@@ -291,7 +367,32 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 ```bash
 docker build -t rag-ocr-system .
-docker run -p 8000:8000 -e GEMINI_API_KEY=your_key rag-ocr-system
+```
+
+Since the LLM now runs locally via Ollama, the recommended way to run this is
+`docker-compose`, which starts an Ollama service alongside the app container so
+the app can reach it on the Docker network (see `docker-compose.yml`):
+
+```bash
+docker compose up --build
+# first run only: pull the model into the ollama container
+docker compose exec ollama ollama pull qwen2.5:3b
+```
+
+This brings up two containers — `app` (FastAPI + Tesseract + ChromaDB) and
+`ollama` (the local LLM server) — with no traffic to any external API at
+runtime. If you'd rather run the app container standalone against an Ollama
+instance already running on the host:
+
+```bash
+docker run -p 8000:8000 \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  rag-ocr-system
+```
+
+Or, to use the optional cloud fallback instead of a local model:
+```bash
+docker run -p 8000:8000 -e LLM_BACKEND=gemini -e GEMINI_API_KEY=your_key rag-ocr-system
 ```
 
 ---
@@ -344,7 +445,7 @@ rag_ocr_system/
 │       ├── chunker.py          # Sliding window chunker (bilingual)
 │       ├── vector_store.py     # ChromaDB + sentence-transformers
 │       ├── database.py         # SQLite metadata store
-│       └── rag_service.py      # End-to-end RAG pipeline (Gemini)
+│       └── rag_service.py      # End-to-end RAG pipeline (local Ollama LLM, optional Gemini fallback)
 ├── static/
 │   └── index.html              # Single-page frontend
 ├── uploads/                    # Uploaded files (gitignored)
@@ -354,5 +455,6 @@ rag_ocr_system/
 ├── server.py                   # Entry point
 ├── requirements.txt
 ├── Dockerfile
+├── docker-compose.yml           # app + local Ollama service
 └── README.md
 ```

@@ -5,7 +5,8 @@ Pipeline:
   1. Apply metadata filters via DatabaseService (hard SQL constraints).
   2. Retrieve top-k semantically relevant chunks via VectorStoreService (ChromaDB).
   3. Build a context-stuffed prompt with the retrieved chunks.
-  4. Generate a grounded answer via the Google Gemini API (gemini-2.5-flash).
+  4. Generate a grounded answer via a LOCAL LLM served by Ollama (default), so that
+     retrieved document text never leaves the machine.
 
 The RAG approach ensures answers are grounded in the uploaded documents rather
 than relying on the model's parametric knowledge. Each answer cites the source
@@ -13,6 +14,15 @@ document and chunk it was drawn from.
 
 Hybrid search flow:
   metadata_filter(SQL) → filtered_chunk_pool → vector_search(ChromaDB) → top_k → LLM
+
+LLM backend:
+  Default backend is Ollama (https://ollama.com), running fully on localhost with
+  no network calls — this keeps the entire pipeline (OCR -> embedding -> retrieval
+  -> generation) local, per the assessment's "no external commercial APIs" requirement.
+
+  An optional cloud fallback (Google Gemini) is supported behind an explicit opt-in
+  env var (LLM_BACKEND=gemini) for environments without enough RAM/CPU to run a local
+  model comfortably. This is OFF by default.
 """
 
 import os
@@ -24,12 +34,67 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
+# ── Backend selection ────────────────────────────────────────────────────────
+# "ollama" (default, fully local) or "gemini" (explicit opt-in, sends context to
+# Google's API — only use this if you cannot run a local model).
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama").lower()
+
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 MAX_CONTEXT_CHARS = 6000   # max chars of retrieved context to send to LLM
 
 
+def _call_ollama(system_prompt: str, user_message: str) -> str:
+    """Call a locally-running Ollama server and return the text response.
+
+    Requires Ollama installed and running (`ollama serve`) with a model pulled,
+    e.g. `ollama pull llama3.1:8b`. No data leaves the machine — this satisfies
+    the assessment's requirement that no document content be sent to external
+    commercial APIs.
+    """
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+    }).encode("utf-8")
+
+    url = f"{OLLAMA_BASE_URL}/api/chat"
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        # Local generation can be slow on CPU-only machines; allow a generous timeout.
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["message"]["content"]
+    except urllib.error.URLError as e:
+        logger.error(f"Could not reach local Ollama server at {OLLAMA_BASE_URL}: {e}")
+        raise RuntimeError(
+            f"Could not reach local Ollama server at {OLLAMA_BASE_URL}. "
+            f"Is it running? Start it with `ollama serve` and ensure the model "
+            f"'{OLLAMA_MODEL}' is pulled (`ollama pull {OLLAMA_MODEL}`)."
+        )
+    except Exception as e:
+        logger.error(f"Ollama call failed: {e}")
+        raise
+
+
 def _call_gemini(system_prompt: str, user_message: str) -> str:
-    """Call the Google Gemini API and return the text response."""
+    """Call the Google Gemini API and return the text response.
+
+    NOTE: this sends retrieved document context to an external commercial API.
+    Only used if LLM_BACKEND=gemini is explicitly set; the default backend is
+    local Ollama (see _call_ollama above).
+    """
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
@@ -63,6 +128,13 @@ def _call_gemini(system_prompt: str, user_message: str) -> str:
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         raise
+
+
+def _call_llm(system_prompt: str, user_message: str) -> str:
+    """Dispatch to the configured LLM backend (local by default)."""
+    if LLM_BACKEND == "gemini":
+        return _call_gemini(system_prompt, user_message)
+    return _call_ollama(system_prompt, user_message)
 
 
 def rag_query(
@@ -184,7 +256,7 @@ def rag_query(
     )
 
     try:
-        answer = _call_gemini(system_prompt, user_message)
+        answer = _call_llm(system_prompt, user_message)
     except Exception as e:
         answer = (
             f"⚠️ LLM generation failed: {e}\n\n"
