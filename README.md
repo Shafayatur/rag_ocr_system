@@ -1,4 +1,4 @@
-# Assessment 3: Local OCR & Dynamic RAG System
+# Local OCR & Dynamic RAG System
 
 A fully localized, privacy-first document processing pipeline with multilingual OCR
 (Bangla + English) and a hybrid semantic search + metadata-filtered RAG system.
